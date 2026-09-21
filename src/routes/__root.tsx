@@ -8,7 +8,7 @@ import { LocaleProvider } from "@/components/locale";
 import { Toaster } from "@/components/ui/toast";
 import appCss from "../styles.css?url";
 
-const APP_NAME = "Kakeibo";
+const APP_NAME = "Wariai";
 
 const fetchSessionUser = createServerFn({ method: "GET" }).handler(async () => {
   const { getSessionUser } = await import("@/lib/auth/verify.server");
@@ -24,7 +24,7 @@ export const Route = createRootRoute({
       { name: "viewport", content: "width=device-width, initial-scale=1, viewport-fit=cover" },
       { title: APP_NAME },
       { name: "theme-color", content: "#1F4E46" },
-      { name: "description", content: "Golden-ratio household budget ledger" },
+      { name: "description", content: "Wariai — put income in its place." },
     ],
     links: [
       { rel: "icon", type: "image/svg+xml", href: "/favicon.svg" },

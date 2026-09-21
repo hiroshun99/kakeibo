@@ -1,8 +1,8 @@
 import type { Locale } from "./types.ts";
 
 const DICT = {
-  appName: { ja: "Kakeibo", en: "Kakeibo" },
-  tagline: { ja: "世帯黄金比の家計簿", en: "Golden-ratio household ledger" },
+  appName: { ja: "Wariai", en: "Wariai" },
+  tagline: { ja: "家計を、わりあてる。", en: "Put income in its place." },
   authFailed: {
     ja: "メールアドレスまたはパスワードが正しくありません",
     en: "Email or password is incorrect",
