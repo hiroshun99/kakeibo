@@ -9,7 +9,7 @@
 - 月末の余りは貯蓄へ自動計上
 
 公開リポジトリ: https://github.com/hiroshun99/kakeibo  
-本番: https://kakeibo-shun-hirois-projects.vercel.app
+本番: https://kakeibo-home.vercel.app
 
 ## セットアップ
 
