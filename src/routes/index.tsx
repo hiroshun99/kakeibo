@@ -85,9 +85,7 @@ function HomeBody() {
         }}
       >
         <div>
-          <p className="pr-16 text-center text-xs font-medium uppercase tracking-[0.16em] text-accent">
-            {t("appName")}
-          </p>
+          <p className="pr-16 text-center text-sm font-medium text-accent">{t("appName")}</p>
           <div className="mt-1 flex items-center justify-between pr-16">
             <button
               type="button"

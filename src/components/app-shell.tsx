@@ -51,10 +51,8 @@ export function AuthFrame({ children }: { children: ReactNode }) {
   return (
     <div className="mx-auto flex min-h-dvh w-full max-w-md flex-col justify-center px-5 py-10 pb-28">
       <div className="mb-8">
-        <p className="text-xs font-medium uppercase tracking-[0.18em] text-accent">{t("appName")}</p>
-        <h1 className="mt-2 font-display text-3xl font-semibold tracking-tight text-fg">
-          {t("tagline")}
-        </h1>
+        <h1 className="font-display text-3xl font-semibold tracking-tight text-fg">{t("appName")}</h1>
+        <p className="mt-2 text-sm text-muted">{t("tagline")}</p>
       </div>
       <div className="rounded-xl bg-surface p-5 shadow-[var(--shadow-border)]">{children}</div>
     </div>
@@ -71,7 +69,7 @@ export function Splash() {
   return (
     <div className="grid min-h-dvh place-items-center bg-bg px-6 text-center">
       <div>
-        <p className="text-sm tracking-wide text-muted">{t("appName")}</p>
+        <p className="font-display text-2xl font-semibold tracking-tight text-fg">{t("appName")}</p>
         <p className="mt-2 text-sm text-subtle">{t("loading")}</p>
         {slow ? (
           <a href="/login" className="mt-5 inline-block min-h-11 px-4 text-sm font-medium text-accent">

@@ -66,7 +66,7 @@ function ReviewBody() {
 
   return (
     <Screen>
-      <p className="text-xs font-medium uppercase tracking-[0.16em] text-accent">{t("appName")}</p>
+      <p className="text-sm font-medium text-accent">{t("appName")}</p>
       <h1 className="mt-2 text-2xl font-semibold tracking-tight">{t("budgetReview")}</h1>
       {data.shortage > 0 ? (
         <div className="mt-4 rounded-lg bg-danger-soft px-3 py-2 text-sm text-danger">

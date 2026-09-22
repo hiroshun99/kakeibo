@@ -65,7 +65,7 @@ function OnboardingForm() {
   if (!boot) {
     return (
       <Screen>
-        <p className="text-xs font-medium uppercase tracking-[0.16em] text-accent">{t("appName")}</p>
+        <p className="text-sm font-medium text-accent">{t("appName")}</p>
         <h1 className="mt-2 text-2xl font-semibold tracking-tight">{t("onboardingTitle")}</h1>
         <p className="mt-4 text-sm text-muted">{t("loading")}</p>
       </Screen>
@@ -119,7 +119,7 @@ function OnboardingForm() {
 
   return (
     <Screen>
-      <p className="text-xs font-medium uppercase tracking-[0.16em] text-accent">{t("appName")}</p>
+      <p className="text-sm font-medium text-accent">{t("appName")}</p>
       <h1 className="mt-2 text-2xl font-semibold tracking-tight">{t("onboardingTitle")}</h1>
       <p className="mt-1 text-sm text-muted">{step + 1} / 3</p>
 
