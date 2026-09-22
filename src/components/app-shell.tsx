@@ -52,7 +52,7 @@ export function AuthFrame({ children }: { children: ReactNode }) {
     <div className="mx-auto flex min-h-dvh w-full max-w-md flex-col justify-center px-5 py-10 pb-28">
       <div className="mb-8">
         <h1 className="font-display text-3xl font-semibold tracking-tight text-fg">{t("appName")}</h1>
-        <p className="mt-2 text-sm text-muted">{t("tagline")}</p>
+        {t("tagline") ? <p className="mt-2 text-sm text-muted">{t("tagline")}</p> : null}
       </div>
       <div className="rounded-xl bg-surface p-5 shadow-[var(--shadow-border)]">{children}</div>
     </div>

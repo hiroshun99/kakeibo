@@ -8,7 +8,7 @@ import { LocaleProvider } from "@/components/locale";
 import { Toaster } from "@/components/ui/toast";
 import appCss from "../styles.css?url";
 
-const APP_NAME = "やりくり";
+const APP_NAME = "家計簿";
 
 const fetchSessionUser = createServerFn({ method: "GET" }).handler(async () => {
   const { getSessionUser } = await import("@/lib/auth/verify.server");
@@ -24,7 +24,7 @@ export const Route = createRootRoute({
       { name: "viewport", content: "width=device-width, initial-scale=1, viewport-fit=cover" },
       { title: APP_NAME },
       { name: "theme-color", content: "#1F4E46" },
-      { name: "description", content: "やりくり — 家計簿" },
+      { name: "description", content: "家計簿" },
     ],
     links: [
       { rel: "icon", type: "image/svg+xml", href: "/favicon.svg" },
