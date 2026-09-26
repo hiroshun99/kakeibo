@@ -18,7 +18,13 @@ import { dirname, join } from "node:path";
 import pg from "pg";
 import { pendingMigrations } from "./migration-plan.mjs";
 
-const databaseUrl = process.env.DATABASE_URL;
+// Vercel's Neon integration sets DATABASE_URL to the pooled host. Migrations
+// use a transaction plus parameterized statements, which the transaction-mode
+// pooler rejects. Prefer the direct connection when the integration provides it.
+const databaseUrl =
+  process.env.DATABASE_URL_UNPOOLED?.trim() ||
+  process.env.POSTGRES_URL_NON_POOLING?.trim() ||
+  process.env.DATABASE_URL?.trim();
 if (!databaseUrl) {
   console.log(
     "[migrate] DATABASE_URL not set — skipping (the PGLite fallback migrates itself).",

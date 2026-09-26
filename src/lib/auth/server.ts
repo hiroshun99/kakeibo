@@ -115,15 +115,36 @@ const baseURL = explicitBaseURL ?? {
 
 // Origins Better Auth accepts on credentialed POSTs (sign-up/sign-in, etc.).
 // Missing entries here surface as FORBIDDEN "Invalid origin".
-const trustedOrigins: string[] = explicitBaseURL
-  ? [explicitBaseURL, ...LOCAL_DEV_ORIGINS]
-  : [
-      // Host wildcards (matched against Origin's host)
-      ...previewAllowedHosts,
-      // Full-origin wildcards (matched against Origin)
-      ...previewAllowedHosts.flatMap((host) => [`https://${host}`, `http://${host}`]),
-      ...LOCAL_DEV_ORIGINS,
-    ];
+// BETTER_AUTH_URL is a single canonical origin. The app is also served from
+// other production aliases (ieikeibo, kakeibo-home, deployment hostnames).
+// A browser on any of those sends that Origin and must be trusted.
+const PRODUCTION_ORIGINS = [
+  "https://ieikeibo.vercel.app",
+  "https://kakeibo-home.vercel.app",
+  "https://kakeibo-khaki-two.vercel.app",
+  "https://kakeibo-shun-hirois-projects.vercel.app",
+  "https://kakeibo-git-main-shun-hirois-projects.vercel.app",
+  "https://kakeibo-*.vercel.app",
+];
+const extraTrusted = (env("BETTER_AUTH_TRUSTED_ORIGINS") ?? "")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+const trustedOrigins: string[] = [
+  ...new Set(
+    explicitBaseURL
+      ? [explicitBaseURL, ...PRODUCTION_ORIGINS, ...extraTrusted, ...LOCAL_DEV_ORIGINS]
+      : [
+          // Host wildcards (matched against Origin's host)
+          ...previewAllowedHosts,
+          // Full-origin wildcards (matched against Origin)
+          ...previewAllowedHosts.flatMap((host) => [`https://${host}`, `http://${host}`]),
+          ...PRODUCTION_ORIGINS,
+          ...extraTrusted,
+          ...LOCAL_DEV_ORIGINS,
+        ],
+  ),
+];
 
 const databaseUrl = env("DATABASE_URL");
 
