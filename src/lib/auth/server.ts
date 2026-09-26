@@ -115,9 +115,9 @@ const baseURL = explicitBaseURL ?? {
 
 // Origins Better Auth accepts on credentialed POSTs (sign-up/sign-in, etc.).
 // Missing entries here surface as FORBIDDEN "Invalid origin".
-// BETTER_AUTH_URL is a single canonical origin. The app is also served from
-// other production aliases (ieikeibo, kakeibo-home, deployment hostnames).
-// A browser on any of those sends that Origin and must be trusted.
+// BETTER_AUTH_URL is the canonical origin (kakeibo-home). Other production
+// hostnames, including the retired misreading ieikeibo.vercel.app, must stay
+// trusted until that host only redirects.
 const PRODUCTION_ORIGINS = [
   "https://ieikeibo.vercel.app",
   "https://kakeibo-home.vercel.app",
