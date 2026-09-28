@@ -9,12 +9,7 @@ dist/
 !.env.example
 screenshots/
 artifacts/
-.grok/preview.log
-.grok/preview.pid
-.grok/status
-.grok/og-pending
-.grok/skills/
-.grok/references/
+.grok/
 AGENTS.md
 AGENTS.project.md
 startup.sh
