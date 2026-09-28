@@ -1,3 +1,7 @@
+<p align="center">
+  <img width="280" alt="家計簿の今月の画面" src="docs/phone.png">
+</p>
+
 # 家計簿
 
 手取りと世帯の条件から14カテゴリへ予算を自動配分します。
