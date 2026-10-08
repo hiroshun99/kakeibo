@@ -6,12 +6,23 @@ import { CATEGORIES, categoryLabel } from "@/lib/kakeibo/categories";
 import { computeBudget } from "@/lib/kakeibo/budget";
 import {
   compareYearMonth,
-  daysInMonth,
   householdTimeZone,
-  lastDayOfMonth,
-  monthRange,
   zonedNow,
 } from "@/lib/kakeibo/dates";
+import { categoryCarry } from "@/lib/kakeibo/rollover";
+import {
+  boundsOf,
+  clampPayday,
+  daysInclusive,
+  isPeriodId,
+  periodContaining,
+  periodLabel,
+  shiftPeriodId,
+  weekBudget,
+  weekWindow,
+  type CycleMode,
+} from "@/lib/kakeibo/periods";
+import { detectWatch, merchantKey, type WatchHit } from "@/lib/kakeibo/watch";
 import type {
   CategoryCode,
   Currency,
@@ -37,6 +48,9 @@ type ProfileRow = {
   housing_actual: number;
   insurance_actual: number;
   onboarding_completed_at: string | Date | null;
+  cycle_mode: CycleMode;
+  payday: number;
+  rollover: boolean;
 };
 
 type BudgetRow = {
@@ -67,6 +81,9 @@ export type PublicProfile = {
   housingActual: number;
   insuranceActual: number;
   onboardingCompleted: boolean;
+  cycleMode: CycleMode;
+  payday: number;
+  rollover: boolean;
 };
 
 export type HomeCategory = {
@@ -81,6 +98,7 @@ export type HomeCategory = {
   red: boolean;
   remainingAlert: boolean;
   paceAlert: boolean;
+  carry: number;
 };
 
 export type HomePayload = {
@@ -97,6 +115,11 @@ export type HomePayload = {
   remaining: number;
   hasBudget: boolean;
   categories: HomeCategory[];
+  periodLabel: string;
+  extraIncome: number;
+  week: { budget: number; spent: number; remaining: number; range: string } | null;
+  hikes: WatchHit[];
+  cancels: WatchHit[];
 };
 
 export type TxnPayload = {
@@ -107,6 +130,11 @@ export type TxnPayload = {
   memo: string | null;
   source: "user" | "system";
   createdAt: string;
+  merchant: string | null;
+  recurring: boolean;
+  kind: "expense" | "income";
+  incomeAllocation: "pool" | "savings" | null;
+  receiptId: string | null;
 };
 
 function iso(value: string | Date | null | undefined): string | null {
@@ -129,13 +157,17 @@ function toPublic(row: ProfileRow): PublicProfile {
     housingActual: Number(row.housing_actual),
     insuranceActual: Number(row.insurance_actual),
     onboardingCompleted: Boolean(row.onboarding_completed_at),
+    cycleMode: row.cycle_mode === "payday" ? "payday" : "calendar",
+    payday: clampPayday(Number(row.payday)),
+    rollover: asBool(row.rollover),
   };
 }
 
 async function loadProfile(sql: Sql, userId: string): Promise<ProfileRow | null> {
   const rows = await sql<ProfileRow>`
     select id, user_id, locale, currency, net_income, household_size, housing_type,
-           has_car, housing_actual, insurance_actual, onboarding_completed_at
+           has_car, housing_actual, insurance_actual, onboarding_completed_at,
+           cycle_mode, payday, rollover
     from household_profiles
     where user_id = ${userId}
     limit 1
@@ -210,13 +242,13 @@ async function persistBudget(
 async function spentBreakdown(
   sql: Sql,
   userId: string,
-  yearMonth: string,
+  periodId: string,
 ): Promise<{
   byCategory: Record<string, number>;
   nonSavings: number;
   savingsUser: number;
 }> {
-  const { start, end } = monthRange(yearMonth);
+  const { start, end } = boundsOf(periodId);
   const rows = await sql<{ category_code: string; source: string; spent: number }>`
     select category_code, source, coalesce(sum(amount), 0) as spent
     from transactions
@@ -224,6 +256,7 @@ async function spentBreakdown(
       and txn_date >= ${start}
       and txn_date <= ${end}
       and deleted_at is null
+      and kind = 'expense'
     group by category_code, source
   `;
   const byCategory: Record<string, number> = {};
@@ -241,12 +274,38 @@ async function spentBreakdown(
   return { byCategory, nonSavings, savingsUser };
 }
 
+async function incomeBreakdown(
+  sql: Sql,
+  userId: string,
+  periodId: string,
+): Promise<{ pool: number; savings: number }> {
+  const { start, end } = boundsOf(periodId);
+  const rows = await sql<{ income_allocation: string | null; total: number }>`
+    select income_allocation, coalesce(sum(amount), 0) as total
+    from transactions
+    where user_id = ${userId}
+      and kind = 'income'
+      and deleted_at is null
+      and txn_date >= ${start}
+      and txn_date <= ${end}
+    group by income_allocation
+  `;
+  let pool = 0;
+  let savings = 0;
+  for (const row of rows) {
+    const amount = Number(row.total);
+    if (row.income_allocation === "savings") savings += amount;
+    else pool += amount;
+  }
+  return { pool, savings };
+}
+
 async function findSystemTxn(
   sql: Sql,
   userId: string,
-  yearMonth: string,
+  periodId: string,
 ): Promise<{ id: string; deleted_at: string | Date | null; amount: number } | null> {
-  const { start, end } = monthRange(yearMonth);
+  const { start, end } = boundsOf(periodId);
   const rows = await sql<{ id: string; deleted_at: string | Date | null; amount: number }>`
     select id, deleted_at, amount
     from transactions
@@ -269,8 +328,9 @@ async function syncSurplus(
   firstClose: boolean,
 ): Promise<void> {
   const { nonSavings, savingsUser } = await spentBreakdown(sql, userId, budget.year_month);
+  const extra = await incomeBreakdown(sql, userId, budget.year_month);
   const surplus = monthSurplus({
-    netIncome: Number(budget.net_income_snapshot),
+    netIncome: Number(budget.net_income_snapshot) + extra.pool + extra.savings,
     spentNonSavings: nonSavings,
     spentSavingsUser: savingsUser,
   });
@@ -290,7 +350,7 @@ async function syncSurplus(
   }
 
   if (surplus > 0) {
-    const lastDay = lastDayOfMonth(budget.year_month);
+    const lastDay = boundsOf(budget.year_month).end;
     const memo = leftoverMemo(locale);
     if (existing && !existing.deleted_at) {
       await sql`
@@ -328,7 +388,11 @@ async function ensureLifecycle(sql: Sql, userId: string, profile: ProfileRow): P
   if (!profile.onboarding_completed_at) return;
   const zone = householdTimeZone(profile.currency);
   const now = zonedNow(zone);
-  const currentYM = now.yearMonth;
+  const currentId = periodContaining(
+    now.ymd,
+    profile.cycle_mode === "payday" ? "payday" : "calendar",
+    Number(profile.payday),
+  ).id;
 
   const budgets = await sql<BudgetRow>`
     select id, user_id, year_month, net_income_snapshot, shortage, closed, system_txn_status
@@ -338,15 +402,25 @@ async function ensureLifecycle(sql: Sql, userId: string, profile: ProfileRow): P
   `;
 
   for (const b of budgets) {
-    if (!asBool(b.closed) && compareYearMonth(b.year_month, currentYM) < 0) {
+    if (!asBool(b.closed) && compareYearMonth(b.year_month, currentId) < 0) {
       await syncSurplus(sql, userId, b, profile.locale, true);
     }
   }
 
-  const hasCurrent = budgets.some((b) => b.year_month === currentYM);
+  const hasCurrent = budgets.some((b) => b.year_month === currentId);
   if (!hasCurrent) {
-    await persistBudget(sql, userId, currentYM, profile, false);
+    await persistBudget(sql, userId, currentId, profile, false);
   }
+}
+
+function profilePeriodId(profile: ProfileRow, ymd?: string): string {
+  const zone = householdTimeZone(profile.currency);
+  const today = ymd ?? zonedNow(zone).ymd;
+  return periodContaining(
+    today,
+    profile.cycle_mode === "payday" ? "payday" : "calendar",
+    Number(profile.payday),
+  ).id;
 }
 
 function parseLocale(value: unknown): Locale {
@@ -371,7 +445,15 @@ function parseProfileInput(data: {
   hasCar: boolean;
   housingActual: number;
   insuranceActual: number;
-}): Omit<ProfileInput, "currency"> & { currency?: Currency } {
+  cycleMode?: string;
+  payday?: number;
+  rollover?: boolean;
+}): Omit<ProfileInput, "currency"> & {
+  currency?: Currency;
+  cycleMode?: CycleMode;
+  payday?: number;
+  rollover?: boolean;
+} {
   const locale = parseLocale(data.locale);
   const housingType = parseHousing(data.housingType);
   const netIncome = Math.trunc(Number(data.netIncome));
@@ -390,6 +472,15 @@ function parseProfileInput(data: {
   if (!Number.isFinite(insuranceActual) || insuranceActual < 0) {
     throw new AppError("invalid", "insurance", 400);
   }
+  let cycleMode: CycleMode | undefined;
+  if (data.cycleMode != null) {
+    if (data.cycleMode !== "calendar" && data.cycleMode !== "payday") {
+      throw new AppError("invalid", "cycle", 400);
+    }
+    cycleMode = data.cycleMode;
+  }
+  const payday = data.payday == null ? undefined : clampPayday(Number(data.payday));
+  const rollover = data.rollover == null ? undefined : Boolean(data.rollover);
   return {
     locale,
     currency: data.currency ? parseCurrency(data.currency) : undefined,
@@ -399,6 +490,9 @@ function parseProfileInput(data: {
     hasCar: Boolean(data.hasCar),
     housingActual,
     insuranceActual,
+    cycleMode,
+    payday,
+    rollover,
   };
 }
 
@@ -427,6 +521,9 @@ export const saveProfile = createServerFn({ method: "POST" })
       hasCar: boolean;
       housingActual: number;
       insuranceActual: number;
+      cycleMode?: string;
+      payday?: number;
+      rollover?: boolean;
     }) => data,
   )
   .handler(async ({ context, data }) => {
@@ -441,11 +538,12 @@ export const saveProfile = createServerFn({ method: "POST" })
       await sql`
         insert into household_profiles (
           id, user_id, locale, currency, net_income, household_size, housing_type,
-          has_car, housing_actual, insurance_actual
+          has_car, housing_actual, insurance_actual, cycle_mode, payday, rollover
         ) values (
           ${crypto.randomUUID()}, ${context.userId}, ${parsed.locale}, ${parsed.currency},
           ${parsed.netIncome}, ${parsed.householdSize}, ${parsed.housingType},
-          ${parsed.hasCar}, ${parsed.housingActual}, ${parsed.insuranceActual}
+          ${parsed.hasCar}, ${parsed.housingActual}, ${parsed.insuranceActual},
+          ${parsed.cycleMode ?? "calendar"}, ${parsed.payday ?? 25}, ${parsed.rollover ?? true}
         )
       `;
     } else {
@@ -458,13 +556,16 @@ export const saveProfile = createServerFn({ method: "POST" })
             has_car = ${parsed.hasCar},
             housing_actual = ${parsed.housingActual},
             insurance_actual = ${parsed.insuranceActual},
+            cycle_mode = coalesce(${parsed.cycleMode ?? null}, cycle_mode),
+            payday = coalesce(${parsed.payday ?? null}, payday),
+            rollover = coalesce(${parsed.rollover ?? null}, rollover),
             updated_at = now()
         where user_id = ${context.userId}
       `;
     }
     const profile = (await loadProfile(sql, context.userId))!;
     if (profile.onboarding_completed_at) {
-      const ym = zonedNow(householdTimeZone(profile.currency)).yearMonth;
+      const ym = profilePeriodId(profile);
       await persistBudget(sql, context.userId, ym, profile, true);
     }
     return { profile: toPublic(profile) };
@@ -485,7 +586,7 @@ export const completeOnboarding = createServerFn({ method: "POST" })
       `;
     }
     const next = (await loadProfile(sql, context.userId))!;
-    const ym = zonedNow(householdTimeZone(next.currency)).yearMonth;
+    const ym = profilePeriodId(next);
     await persistBudget(sql, context.userId, ym, next, true);
     return { profile: toPublic(next) };
   });
@@ -526,21 +627,30 @@ async function buildHome(
   await ensureLifecycle(sql, userId, profile);
   const zone = householdTimeZone(profile.currency);
   const now = zonedNow(zone);
-  const currentYearMonth = now.yearMonth;
-  const ym = month && /^\d{4}-\d{2}$/.test(month) ? month : currentYearMonth;
-  const isCurrentMonth = ym === currentYearMonth;
-  const [ys, ms] = ym.split("-");
-  const year = Number(ys);
-  const monthNum = Number(ms);
-  const monthDays = daysInMonth(year, monthNum);
-  const dayIndex = isCurrentMonth ? now.day : monthDays;
+  const currentId = profilePeriodId(profile, now.ymd);
+  const ym = month && isPeriodId(month) ? month : currentId;
+  const bounds = boundsOf(ym);
+  const isCurrentMonth = ym === currentId;
+  const periodDays = daysInclusive(bounds.start, bounds.end);
+  const dayIndex = isCurrentMonth
+    ? Math.min(periodDays, daysInclusive(bounds.start, now.ymd))
+    : periodDays;
 
-  const budgets = await sql<BudgetRow>`
+  let budgets = await sql<BudgetRow>`
     select id, user_id, year_month, net_income_snapshot, shortage, closed, system_txn_status
     from monthly_budgets
     where user_id = ${userId} and year_month = ${ym}
     limit 1
   `;
+  if (!budgets[0] && ym === currentId) {
+    await persistBudget(sql, userId, ym, profile, false);
+    budgets = await sql<BudgetRow>`
+      select id, user_id, year_month, net_income_snapshot, shortage, closed, system_txn_status
+      from monthly_budgets
+      where user_id = ${userId} and year_month = ${ym}
+      limit 1
+    `;
+  }
   const budget = budgets[0];
   if (budget && asBool(budget.closed)) {
     await syncSurplus(sql, userId, budget, profile.locale, false);
@@ -555,19 +665,39 @@ async function buildHome(
     : [];
   const lineByCode = new Map(lines.map((l) => [l.category_code, l]));
   const spent = await spentBreakdown(sql, userId, ym);
+  const prevId = shiftPeriodId(ym, -1);
+  const prevLines = await sql<LineRow>`
+    select l.category_code, l.ratio_pct, l.budget_amount, l.compressed, l.mandatory_override
+    from monthly_budget_lines l
+    join monthly_budgets b on b.id = l.monthly_budget_id
+    where b.user_id = ${userId} and b.year_month = ${prevId}
+  `;
+  const prevSpent = prevLines.length ? await spentBreakdown(sql, userId, prevId) : null;
+  const carry = categoryCarry(
+    prevLines.map((l) => ({
+      categoryCode: l.category_code,
+      budgetAmount: Number(l.budget_amount),
+    })),
+    prevSpent?.byCategory ?? {},
+    asBool(profile.rollover),
+  );
+  const extra = await incomeBreakdown(sql, userId, ym);
   const netIncome = budget ? Number(budget.net_income_snapshot) : Number(profile.net_income);
   const shortage = budget ? Number(budget.shortage) : 0;
 
   const categories: HomeCategory[] = CATEGORIES.map((cat) => {
     const line = lineByCode.get(cat.code);
-    const budgetAmount = line ? Number(line.budget_amount) : 0;
+    const base = line ? Number(line.budget_amount) : 0;
+    const carried = carry[cat.code] ?? 0;
+    const savingsBoost = cat.code === "savings" ? extra.savings : 0;
+    const budgetAmount = base + carried + savingsBoost;
     const spentAmt = spent.byCategory[cat.code] ?? 0;
     const alert = categoryAlert({
       budget: budgetAmount,
       spent: spentAmt,
       isCurrentMonth,
       dayIndex,
-      monthDays,
+      monthDays: periodDays,
     });
     return {
       categoryCode: cat.code,
@@ -581,24 +711,96 @@ async function buildHome(
       red: alert.red,
       remainingAlert: alert.remainingAlert,
       paceAlert: alert.paceAlert,
+      carry: carried,
     };
   });
 
   const totalSpent = Object.values(spent.byCategory).reduce((s, n) => s + n, 0);
+  const extraIncome = extra.pool + extra.savings;
+  const weekSkip = new Set(["savings", "housing", "insurance"]);
+  const spendable = categories
+    .filter((c) => !weekSkip.has(c.categoryCode))
+    .reduce((s, c) => s + c.budgetAmount, 0);
+  const weekSlice = isCurrentMonth ? weekWindow(bounds.start, bounds.end, now.ymd) : null;
+  let week: HomePayload["week"] = null;
+  if (weekSlice) {
+    const rows = await sql<{ spent: number }>`
+      select coalesce(sum(amount), 0) as spent
+      from transactions
+      where user_id = ${userId}
+        and kind = 'expense'
+        and category_code not in ('savings', 'housing', 'insurance')
+        and deleted_at is null
+        and txn_date >= ${weekSlice.start}
+        and txn_date <= ${weekSlice.end}
+    `;
+    const weekSpent = Number(rows[0]?.spent ?? 0);
+    const budgetAmount = weekBudget(spendable, periodDays, weekSlice.days);
+    const md = (ymd: string) => {
+      const parts = ymd.split("-");
+      return `${Number(parts[1])}/${Number(parts[2])}`;
+    };
+    week = {
+      budget: budgetAmount,
+      spent: weekSpent,
+      remaining: budgetAmount - weekSpent,
+      range: `${md(weekSlice.start)}–${md(weekSlice.end)}`,
+    };
+  }
+
+  const watchFrom = shiftPeriodId(/^\d{4}-\d{2}/.test(ym) ? ym.slice(0, 7) : now.yearMonth, -8);
+  const watchStart = /^\d{4}-\d{2}-\d{2}$/.test(watchFrom) ? watchFrom : `${watchFrom}-01`;
+  const chargeRows = await sql<{
+    merchant: string | null;
+    memo: string | null;
+    amount: number;
+    txn_date: string;
+    category_code: CategoryCode;
+    recurring: boolean;
+  }>`
+    select merchant, memo, amount, txn_date, category_code, recurring
+    from transactions
+    where user_id = ${userId}
+      and source = 'user'
+      and kind = 'expense'
+      and deleted_at is null
+      and txn_date >= ${watchStart}
+    order by txn_date desc
+    limit 500
+  `;
+  const dismissed = await sql<{ merchant_key: string; kind: "hike" | "cancel" }>`
+    select merchant_key, kind from watch_dismissals where user_id = ${userId}
+  `;
+  const watches = detectWatch(
+    chargeRows.map((row) => ({
+      ymd: String(row.txn_date).slice(0, 10),
+      amount: Number(row.amount),
+      category: row.category_code,
+      label: (row.merchant || row.memo || "").trim(),
+      recurring: asBool(row.recurring),
+    })),
+    dismissed.map((d) => ({ key: d.merchant_key, kind: d.kind })),
+  );
+
   return {
     profile: toPublic(profile),
-    currentYearMonth,
+    currentYearMonth: currentId,
     todayYmd: now.ymd,
     month: ym,
     isCurrentMonth,
     dayIndex,
-    monthDays,
+    monthDays: periodDays,
     shortage,
     netIncome,
     totalSpent,
-    remaining: netIncome - totalSpent,
+    remaining: netIncome + extraIncome - totalSpent,
     hasBudget: Boolean(budget),
     categories,
+    periodLabel: periodLabel(ym, profile.locale),
+    extraIncome,
+    week,
+    hikes: watches.hikes,
+    cancels: watches.cancels,
   };
 }
 
@@ -628,8 +830,9 @@ export const loadTransactions = createServerFn({ method: "POST" })
     await ensureLifecycle(sql, context.userId, profile);
     const zone = householdTimeZone(profile.currency);
     const now = zonedNow(zone);
-    const ym = data?.month && /^\d{4}-\d{2}$/.test(data.month) ? data.month : now.yearMonth;
-    const { start, end } = monthRange(ym);
+    const currentId = profilePeriodId(profile, now.ymd);
+    const ym = data?.month && isPeriodId(data.month) ? data.month : currentId;
+    const { start, end } = boundsOf(ym);
     const rows = await sql<{
       id: string;
       category_code: CategoryCode;
@@ -638,8 +841,14 @@ export const loadTransactions = createServerFn({ method: "POST" })
       memo: string | null;
       source: "user" | "system";
       created_at: string | Date;
+      merchant: string | null;
+      recurring: boolean;
+      kind: "expense" | "income";
+      income_allocation: "pool" | "savings" | null;
+      receipt_id: string | null;
     }>`
-      select id, category_code, amount, txn_date, memo, source, created_at
+      select id, category_code, amount, txn_date, memo, source, created_at,
+             merchant, recurring, kind, income_allocation, receipt_id
       from transactions
       where user_id = ${context.userId}
         and txn_date >= ${start}
@@ -655,10 +864,16 @@ export const loadTransactions = createServerFn({ method: "POST" })
       memo: r.memo,
       source: r.source,
       createdAt: iso(r.created_at) ?? "",
+      merchant: r.merchant,
+      recurring: asBool(r.recurring),
+      kind: r.kind === "income" ? "income" : "expense",
+      incomeAllocation: r.income_allocation === "savings" ? "savings" : r.income_allocation === "pool" ? "pool" : null,
+      receiptId: r.receipt_id,
     }));
     return {
       month: ym,
-      currentYearMonth: now.yearMonth,
+      periodLabel: periodLabel(ym, profile.locale),
+      currentYearMonth: currentId,
       todayYmd: now.ymd,
       profile: toPublic(profile),
       items,
@@ -688,13 +903,13 @@ function parseTxnInput(data: {
 }
 
 async function afterTxnChange(sql: Sql, userId: string, profile: ProfileRow, txnDate: string) {
-  const ym = txnDate.slice(0, 7);
-  const currentYM = zonedNow(householdTimeZone(profile.currency)).yearMonth;
-  if (compareYearMonth(ym, currentYM) >= 0) return;
+  const periodId = profilePeriodId(profile, txnDate);
+  const currentId = profilePeriodId(profile);
+  if (compareYearMonth(periodId, currentId) >= 0) return;
   const budgets = await sql<BudgetRow>`
     select id, user_id, year_month, net_income_snapshot, shortage, closed, system_txn_status
     from monthly_budgets
-    where user_id = ${userId} and year_month = ${ym}
+    where user_id = ${userId} and year_month = ${periodId}
     limit 1
   `;
   if (budgets[0] && asBool(budgets[0].closed)) {
@@ -702,11 +917,66 @@ async function afterTxnChange(sql: Sql, userId: string, profile: ProfileRow, txn
   }
 }
 
+type EntryLine = { categoryCode: CategoryCode; amount: number };
+
+function parseEntry(data: {
+  amount?: number;
+  categoryCode?: string;
+  txnDate: string;
+  memo?: string | null;
+  merchant?: string | null;
+  recurring?: boolean;
+  kind?: string;
+  incomeAllocation?: string;
+  lines?: { categoryCode: string; amount: number }[];
+}) {
+  const txnDate = String(data.txnDate ?? "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(txnDate)) throw new AppError("invalid", "date", 400);
+  const memoRaw = (data.memo ?? "").trim();
+  if (memoRaw.length > 100) throw new AppError("invalid", "memo", 400);
+  const merchantRaw = (data.merchant ?? "").trim();
+  if (merchantRaw.length > 40) throw new AppError("invalid", "merchant", 400);
+  const kind = data.kind === "income" ? "income" : "expense";
+  const allocation = data.incomeAllocation === "savings" ? "savings" : "pool";
+  const raw =
+    kind === "income"
+      ? [{ categoryCode: allocation === "savings" ? "savings" : "other", amount: data.amount }]
+      : data.lines?.length
+        ? data.lines
+        : [{ categoryCode: data.categoryCode ?? "", amount: data.amount }];
+  if (raw.length < 1 || raw.length > 6) throw new AppError("invalid", "lines", 400);
+  const lines: EntryLine[] = raw.map((line) => {
+    const amount = Math.trunc(Number(line.amount));
+    if (!Number.isFinite(amount) || amount <= 0) throw new AppError("invalid", "amount", 400);
+    const category = CATEGORIES.find((c) => c.code === line.categoryCode);
+    if (!category) throw new AppError("invalid", "category", 400);
+    return { categoryCode: category.code, amount };
+  });
+  return {
+    txnDate,
+    memo: memoRaw.length ? memoRaw : null,
+    merchant: merchantRaw.length ? merchantRaw : null,
+    recurring: Boolean(data.recurring) && kind === "expense" && lines.length === 1,
+    kind,
+    allocation: kind === "income" ? allocation : null,
+    lines,
+  };
+}
+
 export const createTransaction = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .validator(
-    (data: { amount: number; categoryCode: string; txnDate: string; memo?: string | null }) =>
-      data,
+    (data: {
+      amount?: number;
+      categoryCode?: string;
+      txnDate: string;
+      memo?: string | null;
+      merchant?: string | null;
+      recurring?: boolean;
+      kind?: string;
+      incomeAllocation?: string;
+      lines?: { categoryCode: string; amount: number }[];
+    }) => data,
   )
   .handler(async ({ context, data }) => {
     await requireVerified(context.userId);
@@ -715,19 +985,27 @@ export const createTransaction = createServerFn({ method: "POST" })
     if (!profile || !profile.onboarding_completed_at) {
       throw new AppError("onboarding", "incomplete", 400);
     }
-    const parsed = parseTxnInput(data);
+    const parsed = parseEntry(data);
     const today = zonedNow(householdTimeZone(profile.currency)).ymd;
     if (parsed.txnDate > today) throw new AppError("future_date", "future", 400);
-    const id = crypto.randomUUID();
-    await sql`
-      insert into transactions (id, user_id, category_code, amount, txn_date, memo, source)
-      values (
-        ${id}, ${context.userId}, ${parsed.categoryCode}, ${parsed.amount},
-        ${parsed.txnDate}, ${parsed.memo}, 'user'
-      )
-    `;
+    const receiptId = parsed.lines.length > 1 ? crypto.randomUUID() : null;
+    const ids: string[] = [];
+    for (const line of parsed.lines) {
+      const id = crypto.randomUUID();
+      ids.push(id);
+      await sql`
+        insert into transactions (
+          id, user_id, category_code, amount, txn_date, memo, source,
+          merchant, receipt_id, recurring, kind, income_allocation
+        ) values (
+          ${id}, ${context.userId}, ${line.categoryCode}, ${line.amount},
+          ${parsed.txnDate}, ${parsed.memo}, 'user',
+          ${parsed.merchant}, ${receiptId}, ${parsed.recurring}, ${parsed.kind}, ${parsed.allocation}
+        )
+      `;
+    }
     await afterTxnChange(sql, context.userId, profile, parsed.txnDate);
-    return { id };
+    return { id: ids[0]! };
   });
 
 export const updateTransaction = createServerFn({ method: "POST" })
@@ -739,6 +1017,9 @@ export const updateTransaction = createServerFn({ method: "POST" })
       categoryCode: string;
       txnDate: string;
       memo?: string | null;
+      merchant?: string | null;
+      recurring?: boolean;
+      incomeAllocation?: string | null;
     }) => data,
   )
   .handler(async ({ context, data }) => {
@@ -751,22 +1032,46 @@ export const updateTransaction = createServerFn({ method: "POST" })
     const parsed = parseTxnInput(data);
     const today = zonedNow(householdTimeZone(profile.currency)).ymd;
     if (parsed.txnDate > today) throw new AppError("future_date", "future", 400);
-    const existing = await sql<{ id: string; txn_date: string }>`
-      select id, txn_date from transactions
+    const merchantRaw = (data.merchant ?? "").trim();
+    if (merchantRaw.length > 40) throw new AppError("invalid", "merchant", 400);
+    const existing = await sql<{
+      id: string;
+      txn_date: string;
+      kind: string;
+      source: "user" | "system";
+      merchant: string | null;
+      recurring: boolean;
+      income_allocation: string | null;
+    }>`
+      select id, txn_date, kind, source, merchant, recurring, income_allocation
+      from transactions
       where id = ${data.id} and user_id = ${context.userId} and deleted_at is null
       limit 1
     `;
     if (!existing[0]) throw new AppError("not_found", "missing", 404);
+    const row = existing[0];
+    const income = row.kind === "income";
+    const allocation = income
+      ? data.incomeAllocation === "savings"
+        ? "savings"
+        : "pool"
+      : null;
+    const categoryCode = income ? (allocation === "savings" ? "savings" : "other") : parsed.categoryCode;
+    const merchant = data.merchant === undefined ? row.merchant : merchantRaw.length ? merchantRaw : null;
+    const recurring = !income && row.source === "user" ? Boolean(data.recurring) : false;
     await sql`
       update transactions
-      set category_code = ${parsed.categoryCode},
+      set category_code = ${categoryCode},
           amount = ${parsed.amount},
           txn_date = ${parsed.txnDate},
           memo = ${parsed.memo},
+          merchant = ${merchant},
+          recurring = ${recurring},
+          income_allocation = ${allocation},
           updated_at = now()
       where id = ${data.id} and user_id = ${context.userId} and deleted_at is null
     `;
-    await afterTxnChange(sql, context.userId, profile, String(existing[0].txn_date).slice(0, 10));
+    await afterTxnChange(sql, context.userId, profile, String(row.txn_date).slice(0, 10));
     await afterTxnChange(sql, context.userId, profile, parsed.txnDate);
     return { ok: true };
   });
@@ -797,11 +1102,11 @@ export const deleteTransaction = createServerFn({ method: "POST" })
       where id = ${data.id} and user_id = ${context.userId} and deleted_at is null
     `;
     if (existing[0].source === "system") {
-      const ym = String(existing[0].txn_date).slice(0, 7);
+      const periodId = profilePeriodId(profile, String(existing[0].txn_date).slice(0, 10));
       await sql`
         update monthly_budgets
         set system_txn_status = 'user_deleted'
-        where user_id = ${context.userId} and year_month = ${ym}
+        where user_id = ${context.userId} and year_month = ${periodId}
       `;
     } else {
       await afterTxnChange(sql, context.userId, profile, String(existing[0].txn_date).slice(0, 10));
@@ -825,8 +1130,13 @@ export const getTransaction = createServerFn({ method: "POST" })
       memo: string | null;
       source: "user" | "system";
       created_at: string | Date;
+      merchant: string | null;
+      recurring: boolean;
+      kind: string;
+      income_allocation: string | null;
     }>`
-      select id, category_code, amount, txn_date, memo, source, created_at
+      select id, category_code, amount, txn_date, memo, source, created_at,
+             merchant, recurring, kind, income_allocation
       from transactions
       where id = ${data.id} and user_id = ${context.userId} and deleted_at is null
       limit 1
@@ -843,6 +1153,29 @@ export const getTransaction = createServerFn({ method: "POST" })
         memo: r.memo,
         source: r.source,
         createdAt: iso(r.created_at) ?? "",
+        merchant: r.merchant,
+        recurring: asBool(r.recurring),
+        kind: r.kind === "income" ? "income" : "expense",
+        incomeAllocation:
+          r.income_allocation === "savings" ? "savings" : r.income_allocation === "pool" ? "pool" : null,
+        receiptId: null,
       } satisfies TxnPayload,
     };
+  });
+
+export const dismissWatch = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((data: { key: string; kind: string }) => data)
+  .handler(async ({ context, data }) => {
+    await requireVerified(context.userId);
+    const kind = data.kind === "cancel" ? "cancel" : data.kind === "hike" ? "hike" : null;
+    const key = merchantKey(String(data.key ?? ""));
+    if (!kind || key.length < 2) throw new AppError("invalid", "watch", 400);
+    const sql = await getSql();
+    await sql`
+      insert into watch_dismissals (user_id, merchant_key, kind)
+      values (${context.userId}, ${key}, ${kind})
+      on conflict (user_id, merchant_key, kind) do nothing
+    `;
+    return { ok: true };
   });

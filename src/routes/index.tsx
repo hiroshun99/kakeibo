@@ -1,9 +1,9 @@
 import { createFileRoute, redirect, useNavigate } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, Plus } from "lucide-react";
-import { loadHome } from "@/lib/server/kakeibo";
+import { loadHome, dismissWatch } from "@/lib/server/kakeibo";
 import type { HomePayload } from "@/lib/server/kakeibo";
-import { addMonths } from "@/lib/kakeibo/dates";
+import { shiftPeriodId } from "@/lib/kakeibo/periods";
 import { formatMoney } from "@/lib/kakeibo/money";
 import { AppGate } from "@/components/gate";
 import { BottomNav, Screen, Splash } from "@/components/app-shell";
@@ -28,11 +28,12 @@ function HomePage() {
 }
 
 function HomeBody() {
-  const { t, locale, setLocale } = useI18n();
+  const { t, setLocale } = useI18n();
   const navigate = useNavigate();
   const [month, setMonth] = useState<string | undefined>(undefined);
   const [data, setData] = useState<HomePayload | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
   const touchX = useRef<number | null>(null);
 
   useEffect(() => {
@@ -51,7 +52,7 @@ function HomeBody() {
     return () => {
       cancelled = true;
     };
-  }, [month, setLocale, t]);
+  }, [month, reloadKey, setLocale, t]);
 
   if (!data && !error) return <Splash />;
   if (!data) {
@@ -64,10 +65,7 @@ function HomeBody() {
   }
 
   const currency = data.profile.currency;
-  const title = new Date(`${data.month}-01T00:00:00`).toLocaleDateString(locale === "ja" ? "ja-JP" : "en-US", {
-    year: "numeric",
-    month: "long",
-  });
+  const title = data.periodLabel;
 
   return (
     <Screen>
@@ -81,7 +79,7 @@ function HomeBody() {
           if (start == null || end == null) return;
           const delta = end - start;
           if (Math.abs(delta) < 60) return;
-          setMonth(addMonths(data.month, delta > 0 ? -1 : 1));
+          setMonth(shiftPeriodId(data.month, delta > 0 ? -1 : 1));
         }}
       >
         <div>
@@ -90,7 +88,7 @@ function HomeBody() {
             <button
               type="button"
               className="grid size-11 place-items-center rounded-lg text-fg"
-              onClick={() => setMonth(addMonths(data.month, -1))}
+              onClick={() => setMonth(shiftPeriodId(data.month, -1))}
               aria-label={t("back")}
             >
               <ChevronLeft className="size-5" />
@@ -99,7 +97,7 @@ function HomeBody() {
             <button
               type="button"
               className="grid size-11 place-items-center rounded-lg text-fg"
-              onClick={() => setMonth(addMonths(data.month, 1))}
+              onClick={() => setMonth(shiftPeriodId(data.month, 1))}
               aria-label={t("next")}
             >
               <ChevronRight className="size-5" />
@@ -122,6 +120,46 @@ function HomeBody() {
             danger={data.remaining < 0}
           />
         </div>
+        {data.extraIncome > 0 ? (
+          <p className="mt-2 text-center text-xs text-muted tabular-nums">
+            {t("extraIncome")} +{formatMoney(data.extraIncome, currency)}
+          </p>
+        ) : null}
+
+        {data.week ? (
+          <div className="mt-4 rounded-xl bg-surface px-4 py-3 shadow-[var(--shadow-border)]">
+            <div className="flex items-baseline justify-between gap-3">
+              <p className="text-sm font-semibold">{t("weekBudget")}</p>
+              <p className="text-xs text-muted tabular-nums">{data.week.range}</p>
+            </div>
+            <div className="mt-3 grid grid-cols-3 gap-2">
+              <WeekStat label={t("budget")} value={formatMoney(data.week.budget, currency)} />
+              <WeekStat label={t("spent")} value={formatMoney(data.week.spent, currency)} />
+              <WeekStat
+                label={t("leftover")}
+                value={formatMoney(data.week.remaining, currency, { signed: data.week.remaining < 0 })}
+                danger={data.week.remaining < 0}
+              />
+            </div>
+            <p className="mt-2 text-xs text-muted">{t("weekHint")}</p>
+          </div>
+        ) : null}
+
+        <WatchList
+          title={t("priceHike")}
+          kind="hike"
+          items={data.hikes}
+          currency={currency}
+          onDismiss={() => setReloadKey((n) => n + 1)}
+        />
+        <WatchList
+          title={t("cancelCandidate")}
+          kind="cancel"
+          items={data.cancels}
+          currency={currency}
+          hint={t("cancelHint")}
+          onDismiss={() => setReloadKey((n) => n + 1)}
+        />
 
         <Button className="mt-5 w-full" onClick={() => navigate({ to: "/expense" })}>
           <Plus className="size-4" />
@@ -136,6 +174,72 @@ function HomeBody() {
       </div>
       <BottomNav />
     </Screen>
+  );
+}
+
+function WatchList({
+  title,
+  kind,
+  items,
+  currency,
+  hint,
+  onDismiss,
+}: {
+  title: string;
+  kind: "hike" | "cancel";
+  items: HomePayload["hikes"];
+  currency: HomePayload["profile"]["currency"];
+  hint?: string;
+  onDismiss: () => void;
+}) {
+  const { t } = useI18n();
+  if (!items.length) return null;
+  return (
+    <div className="mt-4 rounded-xl bg-surface px-4 py-3 shadow-[var(--shadow-border)]">
+      <p className="text-sm font-semibold">{title}</p>
+      <ul className="mt-2 space-y-3">
+        {items.map((item) => (
+          <li key={`${kind}-${item.key}`} className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <p className="truncate text-sm font-medium">{item.label}</p>
+              <p className="text-xs text-muted tabular-nums">
+                {kind === "hike"
+                  ? `${formatMoney(item.previous, currency)} → ${formatMoney(item.latest, currency)}`
+                  : hint}
+              </p>
+            </div>
+            <button
+              type="button"
+              className="min-h-11 shrink-0 px-2 text-xs font-medium text-accent"
+              onClick={() => {
+                void dismissWatch({ data: { key: item.key, kind } }).then(onDismiss);
+              }}
+            >
+              {t("dismiss")}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function WeekStat({
+  label,
+  value,
+  danger,
+}: {
+  label: string;
+  value: string;
+  danger?: boolean;
+}) {
+  return (
+    <div>
+      <p className="text-xs font-medium text-muted">{label}</p>
+      <p className={`mt-1 text-sm font-semibold tabular-nums ${danger ? "text-danger" : "text-fg"}`}>
+        {value}
+      </p>
+    </div>
   );
 }
 

@@ -6,6 +6,7 @@ import { authClient } from "@/lib/auth/client";
 import { getBootstrap, saveProfile } from "@/lib/server/kakeibo";
 import type { PublicProfile } from "@/lib/server/kakeibo";
 import type { HousingType } from "@/lib/kakeibo/types";
+import type { CycleMode } from "@/lib/kakeibo/periods";
 import { passwordValid } from "@/lib/kakeibo/password";
 import { AppGate } from "@/components/gate";
 import { BottomNav, Screen, Splash } from "@/components/app-shell";
@@ -34,6 +35,9 @@ function SettingsBody() {
   const [hasCar, setHasCar] = useState(true);
   const [housingActual, setHousingActual] = useState(0);
   const [insuranceActual, setInsuranceActual] = useState(0);
+  const [cycleMode, setCycleMode] = useState<CycleMode>("calendar");
+  const [payday, setPayday] = useState(25);
+  const [rollover, setRollover] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [currentPassword, setCurrentPassword] = useState("");
@@ -51,6 +55,9 @@ function SettingsBody() {
       setHasCar(boot.profile.hasCar);
       setHousingActual(boot.profile.housingActual);
       setInsuranceActual(boot.profile.insuranceActual);
+      setCycleMode(boot.profile.cycleMode);
+      setPayday(boot.profile.payday);
+      setRollover(boot.profile.rollover);
     });
   }, [setLocale]);
 
@@ -65,6 +72,9 @@ function SettingsBody() {
         hasCar,
         housingActual,
         insuranceActual,
+        cycleMode,
+        payday,
+        rollover,
       },
     }).then((result) => setProfile(result.profile));
   }, [locale]);
@@ -85,6 +95,9 @@ function SettingsBody() {
           hasCar,
           housingActual,
           insuranceActual,
+          cycleMode,
+          payday,
+          rollover,
         },
       });
       setProfile(result.profile);
@@ -190,6 +203,50 @@ function SettingsBody() {
           onMinor={setInsuranceActual}
         />
         <FieldError>{error}</FieldError>
+        <Button type="submit" className="w-full" disabled={pending}>
+          {pending ? t("loading") : t("save")}
+        </Button>
+      </form>
+
+      <form onSubmit={onSave} className="mt-4 space-y-4 rounded-xl bg-surface p-4 shadow-[var(--shadow-border)]">
+        <p className="text-sm font-semibold">{t("cycle")}</p>
+        <div>
+          <Label htmlFor="cycle">{t("cycle")}</Label>
+          <Select
+            id="cycle"
+            value={cycleMode}
+            onChange={(e) => setCycleMode(e.target.value === "payday" ? "payday" : "calendar")}
+          >
+            <option value="calendar">{t("calendarMonth")}</option>
+            <option value="payday">{t("paydayCycle")}</option>
+          </Select>
+        </div>
+        {cycleMode === "payday" ? (
+          <div>
+            <Label htmlFor="payday">{t("payday")}</Label>
+            <Input
+              id="payday"
+              type="number"
+              min={1}
+              max={28}
+              value={payday}
+              onChange={(e) => setPayday(Math.min(28, Math.max(1, Number(e.target.value) || 1)))}
+            />
+            <Hint>{t("paydayHint")}</Hint>
+          </div>
+        ) : null}
+        <div>
+          <Label htmlFor="rollover">{t("rollover")}</Label>
+          <Select
+            id="rollover"
+            value={rollover ? "on" : "off"}
+            onChange={(e) => setRollover(e.target.value === "on")}
+          >
+            <option value="on">{t("on")}</option>
+            <option value="off">{t("off")}</option>
+          </Select>
+          <Hint>{t("rolloverHint")}</Hint>
+        </div>
         <Button type="submit" className="w-full" disabled={pending}>
           {pending ? t("loading") : t("save")}
         </Button>

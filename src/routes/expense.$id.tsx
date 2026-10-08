@@ -31,6 +31,11 @@ function EditForm() {
   const [category, setCategory] = useState<CategoryCode>("food");
   const [date, setDate] = useState("");
   const [memo, setMemo] = useState("");
+  const [merchant, setMerchant] = useState("");
+  const [recurring, setRecurring] = useState(false);
+  const [kind, setKind] = useState<"expense" | "income">("expense");
+  const [allocation, setAllocation] = useState<"pool" | "savings">("pool");
+  const [source, setSource] = useState<"user" | "system">("user");
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [ready, setReady] = useState(false);
@@ -44,6 +49,11 @@ function EditForm() {
         setCategory(txn.item.categoryCode);
         setDate(txn.item.txnDate);
         setMemo(txn.item.memo ?? "");
+        setMerchant(txn.item.merchant ?? "");
+        setRecurring(txn.item.recurring);
+        setKind(txn.item.kind);
+        setAllocation(txn.item.incomeAllocation === "savings" ? "savings" : "pool");
+        setSource(txn.item.source);
         setReady(true);
       })
       .catch(() => setError(t("saveFailed")));
@@ -65,7 +75,16 @@ function EditForm() {
     setPending(true);
     try {
       await updateTransaction({
-        data: { id, amount, categoryCode: category, txnDate: date, memo: memo.trim() || null },
+        data: {
+          id,
+          amount,
+          categoryCode: category,
+          txnDate: date,
+          memo: memo.trim() || null,
+          merchant: merchant.trim() || null,
+          recurring,
+          incomeAllocation: kind === "income" ? allocation : null,
+        },
       });
       await navigate({ to: "/history" });
     } catch (err) {
@@ -88,7 +107,9 @@ function EditForm() {
 
   return (
     <Screen>
-      <h1 className="text-2xl font-semibold tracking-tight">{t("editExpense")}</h1>
+      <h1 className="text-2xl font-semibold tracking-tight">
+        {kind === "income" ? t("incomeTitle") : t("editExpense")}
+      </h1>
       <form onSubmit={onSubmit} className="mt-6 space-y-4">
         <MoneyField
           id="amount"
@@ -98,20 +119,46 @@ function EditForm() {
           onMinor={setAmount}
           minZero={false}
         />
-        <div>
-          <Label htmlFor="category">{t("category")}</Label>
-          <Select
-            id="category"
-            value={category}
-            onChange={(e) => setCategory(e.target.value as CategoryCode)}
-          >
-            {CATEGORIES.map((c) => (
-              <option key={c.code} value={c.code}>
-                {categoryLabel(c.code, locale)}
-              </option>
-            ))}
-          </Select>
-        </div>
+        {kind === "income" ? (
+          <div>
+            <Label htmlFor="allocation">{t("incomeTab")}</Label>
+            <Select
+              id="allocation"
+              value={allocation}
+              onChange={(e) => setAllocation(e.target.value === "savings" ? "savings" : "pool")}
+            >
+              <option value="pool">{t("allocatePool")}</option>
+              <option value="savings">{t("allocateSavings")}</option>
+            </Select>
+          </div>
+        ) : (
+          <div>
+            <Label htmlFor="category">{t("category")}</Label>
+            <Select
+              id="category"
+              value={category}
+              onChange={(e) => setCategory(e.target.value as CategoryCode)}
+            >
+              {CATEGORIES.map((c) => (
+                <option key={c.code} value={c.code}>
+                  {categoryLabel(c.code, locale)}
+                </option>
+              ))}
+            </Select>
+          </div>
+        )}
+        {source === "user" ? (
+          <div>
+            <Label htmlFor="merchant">{t("merchant")}</Label>
+            <Input
+              id="merchant"
+              maxLength={40}
+              value={merchant}
+              onChange={(e) => setMerchant(e.target.value.slice(0, 40))}
+              placeholder={t("merchantPlaceholder")}
+            />
+          </div>
+        ) : null}
         <div>
           <Label htmlFor="date">{t("date")}</Label>
           <Input
@@ -134,6 +181,16 @@ function EditForm() {
           />
           <Hint>{memo.length}/100</Hint>
         </div>
+        {kind === "expense" && source === "user" ? (
+          <label className="flex min-h-11 items-center gap-3 text-sm">
+            <input
+              type="checkbox"
+              checked={recurring}
+              onChange={(e) => setRecurring(e.target.checked)}
+            />
+            {t("recurring")}
+          </label>
+        ) : null}
         <FieldError>{error}</FieldError>
         <div className="flex gap-3">
           <Button type="button" variant="secondary" className="flex-1" onClick={() => navigate({ to: "/history" })}>

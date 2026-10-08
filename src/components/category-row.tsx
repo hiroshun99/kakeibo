@@ -26,6 +26,7 @@ export function CategoryRow({
           </p>
           <p className="text-xs text-muted tabular-nums">
             {t("spent")} {formatMoney(row.spent, currency)} / {formatMoney(row.budgetAmount, currency)}
+            {row.carry > 0 ? ` · ${t("carry")} +${formatMoney(row.carry, currency)}` : ""}
           </p>
         </div>
         <p

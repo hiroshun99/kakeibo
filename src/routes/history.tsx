@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { loadTransactions } from "@/lib/server/kakeibo";
 import type { TxnPayload } from "@/lib/server/kakeibo";
-import { addMonths } from "@/lib/kakeibo/dates";
+import { shiftPeriodId } from "@/lib/kakeibo/periods";
 import { formatMoney } from "@/lib/kakeibo/money";
 import { categoryLabel } from "@/lib/kakeibo/categories";
 import type { Currency, Locale } from "@/lib/kakeibo/types";
@@ -29,6 +29,7 @@ function HistoryBody() {
   const [currency, setCurrency] = useState<Currency>("JPY");
   const [error, setError] = useState<string | null>(null);
   const [titleMonth, setTitleMonth] = useState("");
+  const [periodLabel, setPeriodLabel] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -39,6 +40,7 @@ function HistoryBody() {
         setCurrency(payload.profile.currency);
         setLocale(payload.profile.locale);
         setTitleMonth(payload.month);
+        setPeriodLabel(payload.periodLabel);
         if (!month) setMonth(payload.month);
       })
       .catch(() => {
@@ -51,12 +53,7 @@ function HistoryBody() {
 
   if (!items && !error) return <Splash />;
 
-  const title = titleMonth
-    ? new Date(`${titleMonth}-01T00:00:00`).toLocaleDateString(locale === "ja" ? "ja-JP" : "en-US", {
-        year: "numeric",
-        month: "long",
-      })
-    : t("history");
+  const title = periodLabel || t("history");
 
   return (
     <Screen>
@@ -64,7 +61,7 @@ function HistoryBody() {
         <button
           type="button"
           className="grid size-11 place-items-center rounded-lg"
-          onClick={() => titleMonth && setMonth(addMonths(titleMonth, -1))}
+          onClick={() => titleMonth && setMonth(shiftPeriodId(titleMonth, -1))}
         >
           <ChevronLeft className="size-5" />
         </button>
@@ -72,7 +69,7 @@ function HistoryBody() {
         <button
           type="button"
           className="grid size-11 place-items-center rounded-lg"
-          onClick={() => titleMonth && setMonth(addMonths(titleMonth, 1))}
+          onClick={() => titleMonth && setMonth(shiftPeriodId(titleMonth, 1))}
         >
           <ChevronRight className="size-5" />
         </button>
@@ -81,40 +78,104 @@ function HistoryBody() {
       {error ? <p className="mt-4 text-sm text-danger">{error}</p> : null}
 
       {!items?.length ? (
-        <p className="mt-10 text-center text-sm text-muted">{t("emptyHistory")}</p>
+        <p className="mt-10 text-center text-sm text-muted">{t("emptyPeriod")}</p>
       ) : (
         <ul className="mt-5 divide-y divide-border rounded-xl bg-surface px-4 shadow-[var(--shadow-border)]">
-          {items.map((item) => (
-            <li key={item.id}>
-              <button
-                type="button"
-                className="flex w-full items-center justify-between gap-3 py-3 text-left"
-                onClick={() => navigate({ to: "/expense/$id", params: { id: item.id } })}
-              >
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-medium">
-                    {categoryLabel(item.categoryCode, locale as Locale)}
-                    {item.source === "system" ? (
-                      <span className="ml-2 rounded-full bg-bg-2 px-1.5 py-0.5 text-xs font-medium text-accent">
-                        {t("autoBadge")}
-                      </span>
-                    ) : null}
-                  </p>
-                  <p className="text-xs text-muted">
-                    {item.txnDate}
-                    {item.memo ? ` · ${displayMemo(item.memo, locale)}` : ""}
-                  </p>
-                </div>
-                <p className="shrink-0 text-sm font-medium tabular-nums">
-                  {formatMoney(item.amount, currency)}
+          {groupReceipts(items).map((group) =>
+            group.length === 1 ? (
+              <HistoryRow key={group[0]!.id} item={group[0]!} currency={currency} locale={locale} />
+            ) : (
+              <li key={group[0]!.receiptId ?? group[0]!.id} className="py-3">
+                <p className="truncate text-sm font-medium">{group[0]!.merchant || t("splitReceipt")}</p>
+                <p className="text-xs text-muted">{group[0]!.txnDate}</p>
+                <ul className="mt-2 space-y-1">
+                  {group.map((item) => (
+                    <li key={item.id}>
+                      <button
+                        type="button"
+                        className="flex min-h-11 w-full items-center justify-between gap-3 text-left"
+                        onClick={() => navigate({ to: "/expense/$id", params: { id: item.id } })}
+                      >
+                        <span className="truncate text-sm text-muted">
+                          {categoryLabel(item.categoryCode, locale as Locale)}
+                        </span>
+                        <span className="shrink-0 text-sm font-medium tabular-nums">
+                          {formatMoney(item.amount, currency)}
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+                <p className="text-right text-xs text-muted tabular-nums">
+                  {t("receiptTotal")}{" "}
+                  {formatMoney(
+                    group.reduce((sum, item) => sum + item.amount, 0),
+                    currency,
+                  )}
                 </p>
-              </button>
-            </li>
-          ))}
+              </li>
+            ),
+          )}
         </ul>
       )}
       <BottomNav />
     </Screen>
+  );
+}
+
+function groupReceipts(items: TxnPayload[]): TxnPayload[][] {
+  const order: string[] = [];
+  const map = new Map<string, TxnPayload[]>();
+  for (const item of items) {
+    const key = item.receiptId ?? item.id;
+    if (!map.has(key)) {
+      map.set(key, []);
+      order.push(key);
+    }
+    map.get(key)!.push(item);
+  }
+  return order.map((key) => map.get(key)!);
+}
+
+function HistoryRow({
+  item,
+  currency,
+  locale,
+}: {
+  item: TxnPayload;
+  currency: Currency;
+  locale: string;
+}) {
+  const { t } = useI18n();
+  const navigate = useNavigate();
+  return (
+    <li>
+      <button
+        type="button"
+        className="flex w-full items-center justify-between gap-3 py-3 text-left"
+        onClick={() => navigate({ to: "/expense/$id", params: { id: item.id } })}
+      >
+        <div className="min-w-0">
+          <p className="truncate text-sm font-medium">
+            {item.kind === "income" ? t("incomeBadge") : categoryLabel(item.categoryCode, locale as Locale)}
+            {item.source === "system" ? (
+              <span className="ml-2 rounded-full bg-bg-2 px-1.5 py-0.5 text-xs font-medium text-accent">
+                {t("autoBadge")}
+              </span>
+            ) : null}
+          </p>
+          <p className="text-xs text-muted">
+            {item.txnDate}
+            {item.merchant ? ` · ${item.merchant}` : ""}
+            {item.memo ? ` · ${displayMemo(item.memo, locale)}` : ""}
+          </p>
+        </div>
+        <p className="shrink-0 text-sm font-medium tabular-nums">
+          {item.kind === "income" ? "+" : ""}
+          {formatMoney(item.amount, currency)}
+        </p>
+      </button>
+    </li>
   );
 }
 
