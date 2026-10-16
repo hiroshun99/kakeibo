@@ -13,7 +13,7 @@ export function categoryCarry(
   for (const line of lines) {
     if (SKIP.has(line.categoryCode)) continue;
     const left = line.budgetAmount - (spent[line.categoryCode] ?? 0);
-    if (left > 0) carry[line.categoryCode] = left;
+    if (left !== 0) carry[line.categoryCode] = left;
   }
   return carry;
 }

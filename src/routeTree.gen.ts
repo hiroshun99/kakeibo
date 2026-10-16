@@ -19,6 +19,7 @@ import { Route as RegisterRouteImport } from './routes/register'
 import { Route as ResetPasswordRouteImport } from './routes/reset-password'
 import { Route as ReviewRouteImport } from './routes/review'
 import { Route as SettingsRouteImport } from './routes/settings'
+import { Route as TrendsRouteImport } from './routes/trends'
 import { Route as VerifyEmailRouteImport } from './routes/verify-email'
 import { Route as ExpenseIdRouteImport } from './routes/expense.$id'
 import { Route as ApiAuthSplatRouteImport } from './routes/api/auth/$'
@@ -73,6 +74,11 @@ const SettingsRoute = SettingsRouteImport.update({
   path: '/settings',
   getParentRoute: () => rootRouteImport,
 } as any)
+const TrendsRoute = TrendsRouteImport.update({
+  id: '/trends',
+  path: '/trends',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const VerifyEmailRoute = VerifyEmailRouteImport.update({
   id: '/verify-email',
   path: '/verify-email',
@@ -100,6 +106,7 @@ export interface FileRoutesByFullPath {
   '/reset-password': typeof ResetPasswordRoute
   '/review': typeof ReviewRoute
   '/settings': typeof SettingsRoute
+  '/trends': typeof TrendsRoute
   '/verify-email': typeof VerifyEmailRoute
   '/expense/$id': typeof ExpenseIdRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
@@ -115,6 +122,7 @@ export interface FileRoutesByTo {
   '/reset-password': typeof ResetPasswordRoute
   '/review': typeof ReviewRoute
   '/settings': typeof SettingsRoute
+  '/trends': typeof TrendsRoute
   '/verify-email': typeof VerifyEmailRoute
   '/expense/$id': typeof ExpenseIdRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
@@ -131,6 +139,7 @@ export interface FileRoutesById {
   '/reset-password': typeof ResetPasswordRoute
   '/review': typeof ReviewRoute
   '/settings': typeof SettingsRoute
+  '/trends': typeof TrendsRoute
   '/verify-email': typeof VerifyEmailRoute
   '/expense/$id': typeof ExpenseIdRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
@@ -148,6 +157,7 @@ export interface FileRouteTypes {
     | '/reset-password'
     | '/review'
     | '/settings'
+    | '/trends'
     | '/verify-email'
     | '/expense/$id'
     | '/api/auth/$'
@@ -163,6 +173,7 @@ export interface FileRouteTypes {
     | '/reset-password'
     | '/review'
     | '/settings'
+    | '/trends'
     | '/verify-email'
     | '/expense/$id'
     | '/api/auth/$'
@@ -178,6 +189,7 @@ export interface FileRouteTypes {
     | '/reset-password'
     | '/review'
     | '/settings'
+    | '/trends'
     | '/verify-email'
     | '/expense/$id'
     | '/api/auth/$'
@@ -194,6 +206,7 @@ export interface RootRouteChildren {
   ResetPasswordRoute: typeof ResetPasswordRoute
   ReviewRoute: typeof ReviewRoute
   SettingsRoute: typeof SettingsRoute
+  TrendsRoute: typeof TrendsRoute
   VerifyEmailRoute: typeof VerifyEmailRoute
   ApiAuthSplatRoute: typeof ApiAuthSplatRoute
 }
@@ -270,6 +283,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SettingsRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/trends': {
+      id: '/trends'
+      path: '/trends'
+      fullPath: '/trends'
+      preLoaderRoute: typeof TrendsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/verify-email': {
       id: '/verify-email'
       path: '/verify-email'
@@ -316,6 +336,7 @@ const rootRouteChildren: RootRouteChildren = {
   ResetPasswordRoute: ResetPasswordRoute,
   ReviewRoute: ReviewRoute,
   SettingsRoute: SettingsRoute,
+  TrendsRoute: TrendsRoute,
   VerifyEmailRoute: VerifyEmailRoute,
   ApiAuthSplatRoute: ApiAuthSplatRoute,
 }

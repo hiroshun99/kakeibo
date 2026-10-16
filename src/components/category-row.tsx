@@ -27,6 +27,12 @@ export function CategoryRow({
           <p className="text-xs text-muted tabular-nums">
             {t("spent")} {formatMoney(row.spent, currency)} / {formatMoney(row.budgetAmount, currency)}
             {row.carry > 0 ? ` · ${t("carry")} +${formatMoney(row.carry, currency)}` : ""}
+            {row.carry < 0 ? (
+              <span className="text-danger">
+                {` · ${t("carry")} -${formatMoney(Math.abs(row.carry), currency)}`}
+              </span>
+            ) : null}
+            {row.seasonal > 0 ? ` · ${t("seasonal")} +${formatMoney(row.seasonal, currency)}` : ""}
           </p>
         </div>
         <p

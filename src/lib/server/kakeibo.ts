@@ -11,6 +11,7 @@ import {
 } from "@/lib/kakeibo/dates";
 import { categoryCarry } from "@/lib/kakeibo/rollover";
 import {
+  addDays,
   boundsOf,
   clampPayday,
   daysInclusive,
@@ -22,7 +23,20 @@ import {
   weekWindow,
   type CycleMode,
 } from "@/lib/kakeibo/periods";
-import { detectWatch, merchantKey, type WatchHit } from "@/lib/kakeibo/watch";
+import { detectSubscriptions, detectWatch, merchantKey, type SubscriptionHit, type WatchHit } from "@/lib/kakeibo/watch";
+import {
+  cashPace,
+  recommendFromHistory,
+  seasonOfMonth,
+  type Season,
+} from "@/lib/kakeibo/pace";
+import {
+  buildCategoryTrends,
+  forecastSavings,
+  livingSpend,
+  savingsPace,
+  type SavingsForecast,
+} from "@/lib/kakeibo/insights";
 import type {
   CategoryCode,
   Currency,
@@ -51,6 +65,7 @@ type ProfileRow = {
   cycle_mode: CycleMode;
   payday: number;
   rollover: boolean;
+  savings_goal: number;
 };
 
 type BudgetRow = {
@@ -84,6 +99,7 @@ export type PublicProfile = {
   cycleMode: CycleMode;
   payday: number;
   rollover: boolean;
+  savingsGoal: number;
 };
 
 export type HomeCategory = {
@@ -99,6 +115,7 @@ export type HomeCategory = {
   remainingAlert: boolean;
   paceAlert: boolean;
   carry: number;
+  seasonal: number;
 };
 
 export type HomePayload = {
@@ -120,6 +137,30 @@ export type HomePayload = {
   week: { budget: number; spent: number; remaining: number; range: string } | null;
   hikes: WatchHit[];
   cancels: WatchHit[];
+  season: Season;
+  pace: {
+    todayAllowance: number;
+    untilPayday: number;
+    paydayDate: string;
+    days: number;
+    shortfallDate: string | null;
+    alreadyShort: boolean;
+  } | null;
+  recommendations: {
+    categoryCode: CategoryCode;
+    label: string;
+    current: number;
+    recommended: number;
+    locked: boolean;
+  }[] | null;
+  compare: {
+    current: number;
+    previous: number;
+    yearAgo: number;
+  };
+  savingsForecast: SavingsForecast | null;
+  subscriptions: SubscriptionHit[];
+  quick: { categoryCode: CategoryCode; label: string; lastAmount: number }[];
 };
 
 export type TxnPayload = {
@@ -160,6 +201,7 @@ function toPublic(row: ProfileRow): PublicProfile {
     cycleMode: row.cycle_mode === "payday" ? "payday" : "calendar",
     payday: clampPayday(Number(row.payday)),
     rollover: asBool(row.rollover),
+    savingsGoal: Number(row.savings_goal ?? 0),
   };
 }
 
@@ -167,7 +209,7 @@ async function loadProfile(sql: Sql, userId: string): Promise<ProfileRow | null>
   const rows = await sql<ProfileRow>`
     select id, user_id, locale, currency, net_income, household_size, housing_type,
            has_car, housing_actual, insurance_actual, onboarding_completed_at,
-           cycle_mode, payday, rollover
+           cycle_mode, payday, rollover, savings_goal
     from household_profiles
     where user_id = ${userId}
     limit 1
@@ -448,11 +490,13 @@ function parseProfileInput(data: {
   cycleMode?: string;
   payday?: number;
   rollover?: boolean;
+  savingsGoal?: number;
 }): Omit<ProfileInput, "currency"> & {
   currency?: Currency;
   cycleMode?: CycleMode;
   payday?: number;
   rollover?: boolean;
+  savingsGoal?: number;
 } {
   const locale = parseLocale(data.locale);
   const housingType = parseHousing(data.housingType);
@@ -481,6 +525,14 @@ function parseProfileInput(data: {
   }
   const payday = data.payday == null ? undefined : clampPayday(Number(data.payday));
   const rollover = data.rollover == null ? undefined : Boolean(data.rollover);
+  let savingsGoal: number | undefined;
+  if (data.savingsGoal != null) {
+    const goal = Math.trunc(Number(data.savingsGoal));
+    if (!Number.isFinite(goal) || goal < 0 || goal > 1_000_000_000_000) {
+      throw new AppError("invalid", "goal", 400);
+    }
+    savingsGoal = goal;
+  }
   return {
     locale,
     currency: data.currency ? parseCurrency(data.currency) : undefined,
@@ -493,6 +545,7 @@ function parseProfileInput(data: {
     cycleMode,
     payday,
     rollover,
+    savingsGoal,
   };
 }
 
@@ -524,6 +577,7 @@ export const saveProfile = createServerFn({ method: "POST" })
       cycleMode?: string;
       payday?: number;
       rollover?: boolean;
+      savingsGoal?: number;
     }) => data,
   )
   .handler(async ({ context, data }) => {
@@ -559,6 +613,7 @@ export const saveProfile = createServerFn({ method: "POST" })
             cycle_mode = coalesce(${parsed.cycleMode ?? null}, cycle_mode),
             payday = coalesce(${parsed.payday ?? null}, payday),
             rollover = coalesce(${parsed.rollover ?? null}, rollover),
+            savings_goal = coalesce(${parsed.savingsGoal ?? null}, savings_goal),
             updated_at = now()
         where user_id = ${context.userId}
       `;
@@ -682,15 +737,29 @@ async function buildHome(
     asBool(profile.rollover),
   );
   const extra = await incomeBreakdown(sql, userId, ym);
+  const season = seasonOfMonth(Number(bounds.start.slice(5, 7)));
+  const seasonRows = await sql<{ category_code: CategoryCode; extra_amount: number }>`
+    select category_code, extra_amount
+    from seasonal_adjustments
+    where user_id = ${userId} and season = ${season}
+  `;
+  const seasonExtra = new Map(
+    seasonRows
+      .filter((row) => row.category_code !== "savings")
+      .map((row) => [row.category_code, Number(row.extra_amount)]),
+  );
   const netIncome = budget ? Number(budget.net_income_snapshot) : Number(profile.net_income);
   const shortage = budget ? Number(budget.shortage) : 0;
 
   const categories: HomeCategory[] = CATEGORIES.map((cat) => {
     const line = lineByCode.get(cat.code);
     const base = line ? Number(line.budget_amount) : 0;
-    const carried = carry[cat.code] ?? 0;
+    const carriedRaw = carry[cat.code] ?? 0;
     const savingsBoost = cat.code === "savings" ? extra.savings : 0;
-    const budgetAmount = base + carried + savingsBoost;
+    const baseWith = base + savingsBoost;
+    const carried = carriedRaw < 0 ? Math.max(carriedRaw, -baseWith) : carriedRaw;
+    const seasonal = cat.code === "savings" ? 0 : (seasonExtra.get(cat.code) ?? 0);
+    const budgetAmount = Math.max(0, baseWith + carried + seasonal);
     const spentAmt = spent.byCategory[cat.code] ?? 0;
     const alert = categoryAlert({
       budget: budgetAmount,
@@ -712,6 +781,7 @@ async function buildHome(
       remainingAlert: alert.remainingAlert,
       paceAlert: alert.paceAlert,
       carry: carried,
+      seasonal,
     };
   });
 
@@ -768,19 +838,109 @@ async function buildHome(
     order by txn_date desc
     limit 500
   `;
-  const dismissed = await sql<{ merchant_key: string; kind: "hike" | "cancel" }>`
+  const dismissed = await sql<{ merchant_key: string; kind: string }>`
     select merchant_key, kind from watch_dismissals where user_id = ${userId}
   `;
+  const watchCharges = chargeRows.map((row) => ({
+    ymd: String(row.txn_date).slice(0, 10),
+    amount: Number(row.amount),
+    category: row.category_code,
+    label: (row.merchant || row.memo || "").trim(),
+    recurring: asBool(row.recurring),
+  }));
   const watches = detectWatch(
-    chargeRows.map((row) => ({
-      ymd: String(row.txn_date).slice(0, 10),
-      amount: Number(row.amount),
-      category: row.category_code,
-      label: (row.merchant || row.memo || "").trim(),
-      recurring: asBool(row.recurring),
-    })),
-    dismissed.map((d) => ({ key: d.merchant_key, kind: d.kind })),
+    watchCharges,
+    dismissed
+      .filter(
+        (row): row is { merchant_key: string; kind: "hike" | "cancel" } =>
+          row.kind === "hike" || row.kind === "cancel",
+      )
+      .map((row) => ({ key: row.merchant_key, kind: row.kind })),
   );
+  const subscriptions = isCurrentMonth
+    ? detectSubscriptions(
+        watchCharges,
+        dismissed.filter((row) => row.kind === "subscription").map((row) => row.merchant_key),
+      )
+    : [];
+
+  const pace = isCurrentMonth
+    ? cashPace({
+        today: now.ymd,
+        periodEnd: bounds.end,
+        payday: clampPayday(Number(profile.payday)),
+        dayIndex,
+        netIncome,
+        extraIncome,
+        totalSpent,
+        categories: categories.map((category) => ({
+          code: category.categoryCode,
+          budget: category.budgetAmount,
+          spent: category.spent,
+        })),
+      })
+    : null;
+
+  const history = budget ? await recentSpends(sql, userId, ym) : [];
+  const suggested = budget
+    ? recommendFromHistory({
+        netIncome,
+        lines: lines.map((line) => ({
+          categoryCode: line.category_code,
+          budgetAmount: Number(line.budget_amount),
+        })),
+        periods: history,
+      })
+    : null;
+  const recommendations =
+    isCurrentMonth && suggested?.some((row) => !row.locked && row.recommended !== row.current)
+    ? [
+        ...suggested.filter((row) => row.categoryCode === "savings"),
+        ...suggested.filter((row) => !row.locked && row.recommended !== row.current).slice(0, 5),
+      ].map((row) => ({
+        ...row,
+        label: categoryLabel(row.categoryCode, profile.locale),
+      }))
+    : null;
+
+  const previousSpent = await spentBreakdown(sql, userId, shiftPeriodId(ym, -1));
+  const yearAgoSpent = await spentBreakdown(sql, userId, shiftPeriodId(ym, -12));
+  const compare = {
+    current: livingSpend(spent.byCategory),
+    previous: livingSpend(previousSpent.byCategory),
+    yearAgo: livingSpend(yearAgoSpent.byCategory),
+  };
+
+  let savingsForecast: SavingsForecast | null = null;
+  if (isCurrentMonth && Number(profile.savings_goal) > 0) {
+    const savedRows = await sql<{ saved: number }>`
+      select coalesce(sum(amount), 0) as saved
+      from transactions
+      where user_id = ${userId}
+        and category_code = 'savings'
+        and kind = 'expense'
+        and deleted_at is null
+    `;
+    const priorBudgets = await sql<{ year_month: string }>`
+      select year_month from monthly_budgets
+      where user_id = ${userId} and year_month < ${ym}
+      order by year_month desc
+      limit 3
+    `;
+    const priorSavings: number[] = [];
+    for (const prior of priorBudgets) {
+      const breakdown = await spentBreakdown(sql, userId, prior.year_month);
+      priorSavings.push(breakdown.byCategory.savings ?? 0);
+    }
+    const planned = Number(lineByCode.get("savings")?.budget_amount ?? 0) + extra.savings;
+    savingsForecast = forecastSavings({
+      goal: Number(profile.savings_goal),
+      saved: Number(savedRows[0]?.saved ?? 0),
+      monthlyPace: savingsPace(priorSavings, planned),
+      today: now.ymd,
+    });
+  }
+  const quick = isCurrentMonth ? await quickCategories(sql, userId, profile.locale, now.ymd) : [];
 
   return {
     profile: toPublic(profile),
@@ -801,6 +961,13 @@ async function buildHome(
     week,
     hikes: watches.hikes,
     cancels: watches.cancels,
+    season,
+    pace,
+    recommendations,
+    compare,
+    savingsForecast,
+    subscriptions,
+    quick,
   };
 }
 
@@ -1168,7 +1335,8 @@ export const dismissWatch = createServerFn({ method: "POST" })
   .validator((data: { key: string; kind: string }) => data)
   .handler(async ({ context, data }) => {
     await requireVerified(context.userId);
-    const kind = data.kind === "cancel" ? "cancel" : data.kind === "hike" ? "hike" : null;
+    const kind =
+      data.kind === "cancel" || data.kind === "hike" || data.kind === "subscription" ? data.kind : null;
     const key = merchantKey(String(data.key ?? ""));
     if (!kind || key.length < 2) throw new AppError("invalid", "watch", 400);
     const sql = await getSql();
@@ -1179,3 +1347,238 @@ export const dismissWatch = createServerFn({ method: "POST" })
     `;
     return { ok: true };
   });
+
+const SEASONS = new Set<Season>(["spring", "summer", "autumn", "winter"]);
+
+async function recentSpends(sql: Sql, userId: string, periodId: string): Promise<Record<string, number>[]> {
+  const periods: Record<string, number>[] = [];
+  let id = periodId;
+  for (let i = 0; i < 6 && periods.length < 3; i += 1) {
+    id = shiftPeriodId(id, -1);
+    const spent = await spentBreakdown(sql, userId, id);
+    const total = Object.values(spent.byCategory).reduce((sum, amount) => sum + amount, 0);
+    if (total > 0) periods.push(spent.byCategory);
+  }
+  return periods;
+}
+
+export const loadSeasonPlan = createServerFn({ method: "GET" })
+  .middleware([authMiddleware])
+  .handler(async ({ context }) => {
+    await requireVerified(context.userId);
+    const sql = await getSql();
+    const profile = await loadProfile(sql, context.userId);
+    if (!profile) throw new AppError("invalid", "profile", 400);
+    const today = zonedNow(householdTimeZone(profile.currency)).ymd;
+    const rows = await sql<{ season: Season; category_code: CategoryCode; extra_amount: number }>`
+      select season, category_code, extra_amount
+      from seasonal_adjustments
+      where user_id = ${context.userId}
+      order by season, category_code
+    `;
+    return {
+      season: seasonOfMonth(Number(today.slice(5, 7))),
+      items: rows
+        .filter((row) => row.category_code !== "savings")
+        .map((row) => ({
+          season: row.season,
+          categoryCode: row.category_code,
+          extraAmount: Number(row.extra_amount),
+        })),
+    };
+  });
+
+export const saveSeasonAdjustment = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((data: { season: string; categoryCode: string; extraAmount: number }) => data)
+  .handler(async ({ context, data }) => {
+    await requireVerified(context.userId);
+    const season = SEASONS.has(data.season as Season) ? (data.season as Season) : null;
+    const category = CATEGORIES.find((item) => item.code === data.categoryCode);
+    const extra = Math.trunc(Number(data.extraAmount));
+    if (!season || !category || category.code === "savings") throw new AppError("invalid", "season", 400);
+    if (!Number.isFinite(extra) || extra < 0 || extra > 10_000_000) throw new AppError("invalid", "amount", 400);
+    const sql = await getSql();
+    if (extra === 0) {
+      await sql`
+        delete from seasonal_adjustments
+        where user_id = ${context.userId} and season = ${season} and category_code = ${category.code}
+      `;
+    } else {
+      await sql`
+        insert into seasonal_adjustments (user_id, season, category_code, extra_amount)
+        values (${context.userId}, ${season}, ${category.code}, ${extra})
+        on conflict (user_id, season, category_code)
+        do update set extra_amount = ${extra}
+      `;
+    }
+    return { ok: true };
+  });
+
+export const applyRecommendations = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .handler(async ({ context }) => {
+    await requireVerified(context.userId);
+    const sql = await getSql();
+    const profile = await loadProfile(sql, context.userId);
+    if (!profile || !profile.onboarding_completed_at) throw new AppError("onboarding", "incomplete", 400);
+    const periodId = profilePeriodId(profile);
+    const budgets = await sql<BudgetRow>`
+      select id, user_id, year_month, net_income_snapshot, shortage, closed, system_txn_status
+      from monthly_budgets
+      where user_id = ${context.userId} and year_month = ${periodId}
+      limit 1
+    `;
+    const budget = budgets[0];
+    if (!budget) throw new AppError("invalid", "budget", 400);
+    const lines = await sql<LineRow>`
+      select category_code, ratio_pct, budget_amount, compressed, mandatory_override
+      from monthly_budget_lines
+      where monthly_budget_id = ${budget.id}
+    `;
+    const suggested = recommendFromHistory({
+      netIncome: Number(budget.net_income_snapshot),
+      lines: lines.map((line) => ({
+        categoryCode: line.category_code,
+        budgetAmount: Number(line.budget_amount),
+      })),
+      periods: await recentSpends(sql, context.userId, periodId),
+    });
+    if (!suggested) return { ok: false };
+    for (const row of suggested) {
+      if (row.locked || row.recommended === row.current) continue;
+      await sql`
+        update monthly_budget_lines
+        set budget_amount = ${row.recommended}
+        where monthly_budget_id = ${budget.id} and category_code = ${row.categoryCode}
+      `;
+    }
+    return { ok: true };
+  });
+
+const QUICK_FALLBACK: CategoryCode[] = [
+  "food",
+  "dining_leisure",
+  "daily",
+  "transport",
+  "hobby_allowance",
+  "other",
+];
+
+async function quickCategories(
+  sql: Sql,
+  userId: string,
+  locale: Locale,
+  today: string,
+): Promise<HomePayload["quick"]> {
+  const since = addDays(today, -120);
+  const rows = await sql<{ category_code: CategoryCode; amount: number }>`
+    select category_code, amount
+    from transactions
+    where user_id = ${userId}
+      and kind = 'expense'
+      and source = 'user'
+      and deleted_at is null
+      and category_code not in ('savings', 'housing', 'insurance')
+      and txn_date >= ${since}
+    order by txn_date desc, created_at desc
+    limit 300
+  `;
+  const stats = new Map<CategoryCode, { n: number; last: number }>();
+  for (const row of rows) {
+    const code = row.category_code;
+    if (!CATEGORIES.some((item) => item.code === code)) continue;
+    const current = stats.get(code) ?? { n: 0, last: 0 };
+    if (current.n === 0) current.last = Number(row.amount);
+    current.n += 1;
+    stats.set(code, current);
+  }
+  const picked: CategoryCode[] = [];
+  for (const [code] of [...stats.entries()].sort((a, b) => b[1].n - a[1].n)) {
+    if (picked.length >= 6) break;
+    picked.push(code);
+  }
+  for (const code of QUICK_FALLBACK) {
+    if (picked.length >= 6) break;
+    if (!picked.includes(code)) picked.push(code);
+  }
+  return picked.map((code) => ({
+    categoryCode: code,
+    label: categoryLabel(code, locale),
+    lastAmount: stats.get(code)?.last ?? 0,
+  }));
+}
+
+function tickLabel(id: string): string {
+  if (/^\d{4}-\d{2}$/.test(id)) return String(Number(id.slice(5)));
+  const parts = id.split("-");
+  return `${Number(parts[1])}/${Number(parts[2])}`;
+}
+
+export type TrendsPayload = {
+  month: string;
+  currentYearMonth: string;
+  periodLabel: string;
+  isCurrentMonth: boolean;
+  currency: Currency;
+  compare: HomePayload["compare"];
+  periods: { id: string; label: string }[];
+  categories: { categoryCode: CategoryCode; label: string; points: number[] }[];
+};
+
+export const loadTrends = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((data: { month?: string } | undefined) => data ?? {})
+  .handler(async ({ context, data }) => {
+    await requireVerified(context.userId);
+    const sql = await getSql();
+    const profile = await loadProfile(sql, context.userId);
+    if (!profile || !profile.onboarding_completed_at) throw new AppError("onboarding", "incomplete", 400);
+    await ensureLifecycle(sql, context.userId, profile);
+    const now = zonedNow(householdTimeZone(profile.currency));
+    const currentId = profilePeriodId(profile, now.ymd);
+    const ym = data?.month && isPeriodId(data.month) ? data.month : currentId;
+    const ids = [5, 4, 3, 2, 1, 0].map((delta) => shiftPeriodId(ym, -delta));
+    const start = boundsOf(ids[0]!).start;
+    const end = boundsOf(ids[ids.length - 1]!).end;
+    const rows = await sql<{ category_code: string; amount: number; txn_date: string }>`
+      select category_code, amount, txn_date
+      from transactions
+      where user_id = ${context.userId}
+        and kind = 'expense'
+        and deleted_at is null
+        and txn_date >= ${start}
+        and txn_date <= ${end}
+    `;
+    const windows = ids.map((id) => ({ id, ...boundsOf(id) }));
+    const byPeriod = new Map<string, Record<string, number>>(ids.map((id) => [id, {}]));
+    for (const row of rows) {
+      if (row.category_code === "savings") continue;
+      const ymd = String(row.txn_date).slice(0, 10);
+      const window = windows.find((item) => ymd >= item.start && ymd <= item.end);
+      if (!window) continue;
+      const bag = byPeriod.get(window.id)!;
+      bag[row.category_code] = (bag[row.category_code] ?? 0) + Number(row.amount);
+    }
+    const periods = ids.map((id) => ({ id, byCategory: byPeriod.get(id) ?? {} }));
+    const yearAgo = await spentBreakdown(sql, context.userId, shiftPeriodId(ym, -12));
+    const series = buildCategoryTrends(periods);
+    return {
+      month: ym,
+      currentYearMonth: currentId,
+      periodLabel: periodLabel(ym, profile.locale),
+      isCurrentMonth: ym === currentId,
+      currency: profile.currency,
+      compare: {
+        current: livingSpend(periods[periods.length - 1]?.byCategory ?? {}),
+        previous: livingSpend(periods[periods.length - 2]?.byCategory ?? {}),
+        yearAgo: livingSpend(yearAgo.byCategory),
+      },
+      periods: ids.map((id) => ({ id, label: tickLabel(id) })),
+      categories: series.map((row) => ({
+        ...row,
+        label: categoryLabel(row.categoryCode, profile.locale),
+      })),
+    } satisfies TrendsPayload;
+  });
+

@@ -3,10 +3,13 @@ import { useEffect, useState, type FormEvent } from "react";
 import { toast } from "sonner";
 import { UserButton } from "@/lib/auth/gates";
 import { authClient } from "@/lib/auth/client";
-import { getBootstrap, saveProfile } from "@/lib/server/kakeibo";
+import { getBootstrap, saveProfile, loadSeasonPlan, saveSeasonAdjustment } from "@/lib/server/kakeibo";
 import type { PublicProfile } from "@/lib/server/kakeibo";
-import type { HousingType } from "@/lib/kakeibo/types";
+import type { CategoryCode, Currency, HousingType } from "@/lib/kakeibo/types";
 import type { CycleMode } from "@/lib/kakeibo/periods";
+import type { Season } from "@/lib/kakeibo/pace";
+import { CATEGORIES, categoryLabel } from "@/lib/kakeibo/categories";
+import { formatMoney } from "@/lib/kakeibo/money";
 import { passwordValid } from "@/lib/kakeibo/password";
 import { AppGate } from "@/components/gate";
 import { BottomNav, Screen, Splash } from "@/components/app-shell";
@@ -38,6 +41,7 @@ function SettingsBody() {
   const [cycleMode, setCycleMode] = useState<CycleMode>("calendar");
   const [payday, setPayday] = useState(25);
   const [rollover, setRollover] = useState(true);
+  const [savingsGoal, setSavingsGoal] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [currentPassword, setCurrentPassword] = useState("");
@@ -58,6 +62,7 @@ function SettingsBody() {
       setCycleMode(boot.profile.cycleMode);
       setPayday(boot.profile.payday);
       setRollover(boot.profile.rollover);
+      setSavingsGoal(boot.profile.savingsGoal);
     });
   }, [setLocale]);
 
@@ -75,6 +80,7 @@ function SettingsBody() {
         cycleMode,
         payday,
         rollover,
+        savingsGoal,
       },
     }).then((result) => setProfile(result.profile));
   }, [locale]);
@@ -98,6 +104,7 @@ function SettingsBody() {
           cycleMode,
           payday,
           rollover,
+          savingsGoal,
         },
       });
       setProfile(result.profile);
@@ -247,10 +254,20 @@ function SettingsBody() {
           </Select>
           <Hint>{t("rolloverHint")}</Hint>
         </div>
+        <MoneyField
+          id="savings-goal"
+          label={t("savingsGoal")}
+          currency={profile.currency}
+          minor={savingsGoal}
+          onMinor={setSavingsGoal}
+        />
+        <Hint>{t("savingsGoalHint")}</Hint>
         <Button type="submit" className="w-full" disabled={pending}>
           {pending ? t("loading") : t("save")}
         </Button>
       </form>
+
+      <SeasonSection currency={profile.currency} />
 
       <form onSubmit={onPassword} className="mt-4 space-y-4 rounded-xl bg-surface p-4 shadow-[var(--shadow-border)]">
         <p className="text-sm font-semibold">{t("changePassword")}</p>
@@ -287,5 +304,113 @@ function SettingsBody() {
       </section>
       <BottomNav />
     </Screen>
+  );
+}
+
+const SEASON_IDS = ["spring", "summer", "autumn", "winter"] as const;
+
+function SeasonSection({ currency }: { currency: Currency }) {
+  const { t, locale } = useI18n();
+  const [season, setSeason] = useState<Season>("autumn");
+  const [category, setCategory] = useState<CategoryCode>("utilities");
+  const [amount, setAmount] = useState(0);
+  const [items, setItems] = useState<{ season: Season; categoryCode: CategoryCode; extraAmount: number }[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+
+  function reload(resetSeason: boolean) {
+    return loadSeasonPlan().then((plan) => {
+      if (resetSeason) setSeason(plan.season);
+      setItems(plan.items);
+    });
+  }
+
+  useEffect(() => {
+    void reload(true).catch(() => setError(t("saveFailed")));
+  }, [t]);
+
+  async function onAdd(e: FormEvent) {
+    e.preventDefault();
+    if (amount <= 0) {
+      setError(t("required"));
+      return;
+    }
+    setPending(true);
+    setError(null);
+    try {
+      await saveSeasonAdjustment({ data: { season, categoryCode: category, extraAmount: amount } });
+      setAmount(0);
+      await reload(false);
+      toast.success(t("saved"));
+    } catch {
+      setError(t("saveFailed"));
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <form onSubmit={onAdd} className="mt-4 space-y-4 rounded-xl bg-surface p-4 shadow-[var(--shadow-border)]">
+      <p className="text-sm font-semibold">{t("seasonBudget")}</p>
+      <Hint>{t("seasonHint")}</Hint>
+      <div>
+        <Label htmlFor="season">{t("seasonBudget")}</Label>
+        <Select id="season" value={season} onChange={(e) => setSeason(e.target.value as Season)}>
+          {SEASON_IDS.map((id) => (
+            <option key={id} value={id}>
+              {t(id)}
+            </option>
+          ))}
+        </Select>
+      </div>
+      <div>
+        <Label htmlFor="season-category">{t("category")}</Label>
+        <Select
+          id="season-category"
+          value={category}
+          onChange={(e) => setCategory(e.target.value as CategoryCode)}
+        >
+          {CATEGORIES.filter((item) => item.code !== "savings").map((item) => (
+            <option key={item.code} value={item.code}>
+              {categoryLabel(item.code, locale)}
+            </option>
+          ))}
+        </Select>
+      </div>
+      <MoneyField
+        id="season-amount"
+        label={t("amount")}
+        currency={currency}
+        minor={amount}
+        onMinor={setAmount}
+      />
+      {items.length ? (
+        <ul className="space-y-2">
+          {items.map((item) => (
+            <li key={`${item.season}-${item.categoryCode}`} className="flex items-center justify-between gap-3">
+              <p className="min-w-0 truncate text-sm">
+                {t(item.season)} · {categoryLabel(item.categoryCode, locale)}
+                <span className="ml-2 tabular-nums">+{formatMoney(item.extraAmount, currency)}</span>
+              </p>
+              <button
+                type="button"
+                className="min-h-11 shrink-0 px-2 text-xs font-medium text-accent"
+                onClick={() => {
+                  void saveSeasonAdjustment({
+                    data: { season: item.season, categoryCode: item.categoryCode, extraAmount: 0 },
+                  }).then(() => reload(false));
+                }}
+              >
+                {t("removeLine")}
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      <FieldError>{error}</FieldError>
+      <Button type="submit" className="w-full" disabled={pending}>
+        {pending ? t("loading") : t("addSeason")}
+      </Button>
+    </form>
   );
 }
